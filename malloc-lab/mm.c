@@ -14,6 +14,7 @@
 #include <assert.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 
 #include "mm.h"
 #include "memlib.h"
@@ -81,6 +82,20 @@ static void *find_first(size_t size);
  */
 int mm_init(void)
 {
+    errno = 0;
+    heap_listp = mem_sbrk(4 * WSIZE);
+    if (errno != 0)
+    {
+        printf("에러 발생은 %d 때문입니다.", errno);
+        return -1;
+    }
+
+    PUT(heap_listp, 0);
+    PUT(heap_listp + WSIZE, PACK(DSIZE, 1));
+    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));
+    PUT(heap_listp + (3 * WSIZE), PACK(0, 1));
+    heap_listp += (2 * WSIZE);
+
     return 0;
 }
 
