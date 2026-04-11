@@ -194,3 +194,18 @@ static void *coalesce(void *bp)
 
     return bp;
 }
+
+static void *find_first(size_t size)
+{
+    void *bp = NEXT_BLKP(heap_listp);
+
+    while (GET_SIZE(HDRP(bp)) > 0)
+    {
+        if (!GET_ALLOC(HDRP(bp)) && size <= GET_SIZE(HDRP(bp)))
+            return bp;
+
+        bp = NEXT_BLKP(bp);
+    }
+
+    return NULL;
+}
