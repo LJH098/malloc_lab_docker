@@ -42,6 +42,40 @@ team_t team = {
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
+/* word and double word size */
+#define WSIZE 4
+#define DSIZE 8
+
+/* default heap extension size */
+#define CHUNKSIZE (1 << 12)
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+/* pack a size and allocated bit into a word */
+#define PACK(size, alloc) ((size) | (alloc))
+
+/* read and write a word at address p */
+#define GET(p) (*(unsigned int *)(p))
+#define PUT(p, val) (*(unsigned int *)(p) = (val))
+
+/* read the size and allocated fields from address p */
+#define GET_SIZE(p) (GET(p) & ~0x7)
+#define GET_ALLOC(p) (GET(p) & 0x1)
+
+/* given block ptr bp, compute address of its header and footer */
+#define HDRP(bp) ((char *)(bp) - WSIZE)
+#define FTRP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)) - DSIZE)
+
+/* given block ptr bp, compute address of next and previous blocks */
+#define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(HDRP(bp)))
+#define PREV_FTRP(bp) ((char *)(bp) - DSIZE)
+#define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(PREV_FTRP(bp)))
+
+static char *heap_listp = NULL;
+
+static void *extend_heap(size_t words);
+static void *coalesce(void *bp);
+static void *find_first(size_t size);
+
 /*
  * mm_init - initialize the malloc package.
  */
