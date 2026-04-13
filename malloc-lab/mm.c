@@ -41,7 +41,7 @@ team_t team = {
 #define OVERHEAD (2 * WSIZE)
 
 // 초기 가용 블록과 힙 확정을 위한 기본 크기
-#define CHUNKSIZE (1 << 12)
+#define CHUNKSIZE ((1 << 12) + OVERHEAD)
 
 #define PTRSIZE ((size_t)sizeof(char *))
 #define MINBLOCKSIZE ALIGN(OVERHEAD + (2 * PTRSIZE))
@@ -172,27 +172,180 @@ void mm_free(void *ptr)
 }
 
 /*
- * mm_realloc - mm_malloc/mm_free 기반의 단순한 realloc.
+ * mm_realloc - 가능하면 현재 블록을 재사용하는 realloc.
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *newptr;
+    size_t asize;
+    size_t oldsize;
+    size_t prev_alloc;
+    size_t prev_size;
+    size_t next_alloc;
+    size_t next_size;
+    size_t total_size;
+    size_t remainder;
     size_t copy_size;
+    char *prev_bp;
+    char *next_bp;
+    char *split_bp;
+    void *newptr;
 
+    // ptr이 NULL이면 realloc은 malloc과 같다.
     if (ptr == NULL)
         return mm_malloc(size);
 
+    // size가 0이면 기존 블록을 해제한다.
     if (size == 0)
     {
         mm_free(ptr);
         return NULL;
     }
 
+    // 새 요청 크기를 블록 단위 크기로 맞추고, 기존 payload 크기도 같이 계산한다.
+    asize = MAX(ALIGN(size + OVERHEAD), MINBLOCKSIZE);
+    oldsize = GET_SIZE(HDRP(ptr));
+    copy_size = oldsize - OVERHEAD;
+
+    // 이미 현재 블록이 충분히 크다면 가능하면 쪼개서 그대로 사용한다.
+    if (asize <= oldsize)
+    {
+        remainder = oldsize - asize;
+
+        if (remainder >= MINBLOCKSIZE)
+        {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            // 남는 뒷부분을 새로운 free block으로 만들고 병합한다.
+            next_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(next_bp), PACK(remainder, 0));
+            PUT(FTRP(next_bp), PACK(remainder, 0));
+            PUT_PTR(PRED_PTR(next_bp), NULL);
+            PUT_PTR(SUCC_PTR(next_bp), NULL);
+            coalesce(next_bp);
+        }
+
+        return ptr;
+    }
+
+    prev_bp = PREV_BLKP(ptr);
+    next_bp = NEXT_BLKP(ptr);
+    prev_alloc = GET_ALLOC(FTRP(prev_bp));
+    prev_size = GET_SIZE(HDRP(prev_bp));
+    next_alloc = GET_ALLOC(HDRP(next_bp));
+    next_size = GET_SIZE(HDRP(next_bp));
+
+    // 다음 블록이 free block이고 크기가 충분하면 뒤로 확장해서 해결한다.
+    if (!next_alloc && (oldsize + next_size) >= asize)
+    {
+        remove_free_block(next_bp);
+        oldsize += next_size;
+        remainder = oldsize - asize;
+
+        if (remainder >= MINBLOCKSIZE)
+        {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            // 뒤쪽에 남는 공간은 다시 free block으로 돌려준다.
+            next_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(next_bp), PACK(remainder, 0));
+            PUT(FTRP(next_bp), PACK(remainder, 0));
+            PUT_PTR(PRED_PTR(next_bp), NULL);
+            PUT_PTR(SUCC_PTR(next_bp), NULL);
+            coalesce(next_bp);
+        }
+        else
+        {
+            PUT(HDRP(ptr), PACK(oldsize, 1));
+            PUT(FTRP(ptr), PACK(oldsize, 1));
+        }
+
+        return ptr;
+    }
+
+    // 이전 블록이 free block이고 둘을 합치면 충분한 경우 = 앞으로 당겨서 재배치한다.
+    if (!prev_alloc && (prev_size + oldsize) >= asize)
+    {
+        remove_free_block(prev_bp);
+        total_size = prev_size + oldsize;
+        remainder = total_size - asize;
+
+        // source와 destination이 겹칠 수 있으므로 memcpy 대신 memmove를 쓴다.
+        memmove(prev_bp, ptr, copy_size);
+
+        if (remainder >= MINBLOCKSIZE)
+        {
+            PUT(HDRP(prev_bp), PACK(asize, 1));
+            PUT(FTRP(prev_bp), PACK(asize, 1));
+
+            // 앞쪽으로 옮기고 남은 뒷부분은 free block으로 만든다.
+            split_bp = NEXT_BLKP(prev_bp);
+            PUT(HDRP(split_bp), PACK(remainder, 0));
+            PUT(FTRP(split_bp), PACK(remainder, 0));
+            PUT_PTR(PRED_PTR(split_bp), NULL);
+            PUT_PTR(SUCC_PTR(split_bp), NULL);
+            coalesce(split_bp);
+        }
+        else
+        {
+            PUT(HDRP(prev_bp), PACK(total_size, 1));
+            PUT(FTRP(prev_bp), PACK(total_size, 1));
+        }
+
+        return prev_bp;
+    }
+
+    // 앞/뒤가 모두 free block이면 세 블록을 합쳐서 최대한 제자리 근처에서 해결한다.
+    if (!prev_alloc && !next_alloc && (prev_size + oldsize + next_size) >= asize)
+    {
+        remove_free_block(prev_bp);
+        remove_free_block(next_bp);
+        total_size = prev_size + oldsize + next_size;
+        remainder = total_size - asize;
+
+        // 최종 payload 시작 위치가 앞당겨지므로 memmove로 복사한다.
+        memmove(prev_bp, ptr, copy_size);
+
+        if (remainder >= MINBLOCKSIZE)
+        {
+            PUT(HDRP(prev_bp), PACK(asize, 1));
+            PUT(FTRP(prev_bp), PACK(asize, 1));
+
+            // 세 블록을 합친 뒤 남는 공간은 다시 free block으로 분할한다.
+            split_bp = NEXT_BLKP(prev_bp);
+            PUT(HDRP(split_bp), PACK(remainder, 0));
+            PUT(FTRP(split_bp), PACK(remainder, 0));
+            PUT_PTR(PRED_PTR(split_bp), NULL);
+            PUT_PTR(SUCC_PTR(split_bp), NULL);
+            coalesce(split_bp);
+        }
+        else
+        {
+            PUT(HDRP(prev_bp), PACK(total_size, 1));
+            PUT(FTRP(prev_bp), PACK(total_size, 1));
+        }
+
+        return prev_bp;
+    }
+
+    // 다음 블록이 에필로그면 힙을 더 늘려서 현재 위치를 유지한다.
+    if (next_size == 0)
+    {
+        if (mem_sbrk(asize - oldsize) == (void *)-1)
+            return NULL;
+
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+        PUT(HDRP(NEXT_BLKP(ptr)), PACK(0, 1));
+        return ptr;
+    }
+
+    // 위 조건들로 해결이 안 되면 새 블록을 할당해서 내용을 옮긴다.
     newptr = mm_malloc(size);
     if (newptr == NULL)
         return NULL;
 
-    copy_size = GET_SIZE(HDRP(ptr)) - OVERHEAD;
     if (size < copy_size)
         copy_size = size;
 
