@@ -147,7 +147,8 @@ void *mm_malloc(size_t size)
         return bp;
     }
 
-    extendsize = MAX(asize, CHUNKSIZE);
+    // fit이 없으면 필요한 크기만큼만 힙을 늘려서 불필요한 힙 증가를 줄인다.
+    extendsize = asize;
     if ((bp = extend_heap(extendsize / WSIZE)) == NULL)
         return NULL;
 
@@ -435,20 +436,31 @@ static void *coalesce(void *bp)
 }
 
 /*
- * find_fit - explicit free list에서 first fit을 찾는다.
+ * find_fit - explicit free list에서 best fit을 찾는다.
  */
 static void *find_fit(size_t asize)
 {
     char *bp;
+    char *best_bp = NULL;
+    size_t best_size = (size_t)-1;
+    size_t block_size;
 
-    // explicit free list를 순회하면서 first fit을 찾는다.
+    // explicit free list를 끝까지 순회하면서 가장 작은 적합 블록을 찾는다.
     for (bp = free_listp; bp != NULL; bp = SUCC(bp))
     {
-        if (GET_SIZE(HDRP(bp)) >= asize)
-            return bp;
+        block_size = GET_SIZE(HDRP(bp));
+
+        if (block_size >= asize && block_size < best_size)
+        {
+            best_bp = bp;
+            best_size = block_size;
+
+            if (block_size == asize)
+                break;
+        }
     }
 
-    return NULL;
+    return best_bp;
 }
 
 /*
